@@ -392,7 +392,12 @@ func (m *monitorModel) toInput(ctx context.Context, update bool, diags *diag.Dia
 		in["notify"] = notify
 	}
 	if known(m.Environments) {
-		in["environments"] = stringsFrom(ctx, m.Environments, diags)
+		// The API takes environment objects; bare key strings are ignored
+		envs := []map[string]string{}
+		for _, k := range stringsFrom(ctx, m.Environments, diags) {
+			envs = append(envs, map[string]string{"key": k})
+		}
+		in["environments"] = envs
 	}
 	for name, v := range map[string]types.String{
 		"platform":         m.Platform,

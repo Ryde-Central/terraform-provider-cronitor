@@ -158,6 +158,18 @@ func mergeMonitor(m, in map[string]any) {
 			if s, ok := v.(string); ok && strings.HasSuffix(s, "h") {
 				v = strings.TrimSuffix(s, "h") + " hours"
 			}
+		case "environments":
+			// Like the API: only environment objects associate the monitor;
+			// bare key strings are ignored.
+			keys := []any{}
+			if list, ok := v.([]any); ok {
+				for _, e := range list {
+					if obj, ok := e.(map[string]any); ok {
+						keys = append(keys, obj["key"])
+					}
+				}
+			}
+			v = keys
 		case "request":
 			if rq, ok := v.(map[string]any); ok {
 				merged := map[string]any{"method": "GET", "timeout_seconds": 10, "follow_redirects": true,
