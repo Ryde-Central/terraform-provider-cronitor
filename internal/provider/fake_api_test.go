@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -68,12 +69,36 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.monitors(w, r.Method, key, body)
 		return
 	}
+	if collection == "ping" {
+		f.ping(w, key, r.URL.Query().Get("env"))
+		return
+	}
 	defaults, ok := fakeDefaults[collection]
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "Not found."})
 		return
 	}
 	f.generic(w, r.Method, collection, key, body, defaults)
+}
+
+// ping is telemetry (cronitor.link/p/<ping key>/<monitor>?env=<env>): like
+// the API, it creates an unknown monitor and is the only way a monitor joins
+// an environment.
+func (f *fakeAPI) ping(w http.ResponseWriter, key, env string) {
+	c := f.coll("monitors")
+	m, ok := c[key]
+	if !ok {
+		m = map[string]any{"key": key, "name": key, "type": "heartbeat", "notify": []any{"default"},
+			"paused": false, "environments": []any{}, "created": time.Now().UTC().Format(time.RFC3339)}
+		c[key] = m
+	}
+	if env != "" {
+		envs, _ := m["environments"].([]any)
+		if !slices.Contains(envs, any(env)) {
+			m["environments"] = append(envs, env)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[string]any) {
@@ -105,7 +130,7 @@ func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[s
 			"timezone":                    "UTC",
 			"realert_interval":            "8 hours",
 			"paused":                      false,
-			"environments":                []any{"production"},
+			"environments":                []any{},
 			"created":                     time.Now().UTC().Format(time.RFC3339),
 			"badges": map[string]any{
 				"simple":   "https://cronitor.io/badges/" + k + "/simple.svg",
@@ -120,8 +145,7 @@ func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[s
 		if body["type"] == "check" {
 			m["platform"] = "http"
 		}
-		// Like the API, creating ignores environments; only the bulk
-		// update sets them
+		// Like the API, creating ignores environments; only telemetry adds them
 		create := maps.Clone(body)
 		delete(create, "environments")
 		mergeMonitor(m, create)
@@ -138,6 +162,11 @@ func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[s
 				m = map[string]any{"name": k, "created": time.Now().UTC().Format(time.RFC3339)}
 				c[k] = m
 			}
+			if added := addedEnvironments(m, in); len(added) > 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{k: map[string]any{"environments": []string{
+					"Environments can be removed from a monitor but not added. To associate a monitor with an environment, start sending telemetry there."}}})
+				return
+			}
 			mergeMonitor(m, in)
 			out = append(out, monitorView(m))
 		}
@@ -152,6 +181,22 @@ func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[s
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, nil)
 	}
+}
+
+// addedEnvironments returns the environments an update would add to m.
+func addedEnvironments(m, in map[string]any) []any {
+	list, ok := in["environments"].([]any)
+	if !ok {
+		return nil
+	}
+	have, _ := m["environments"].([]any)
+	var added []any
+	for _, e := range list {
+		if obj, ok := e.(map[string]any); ok && !slices.Contains(have, obj["key"]) {
+			added = append(added, obj["key"])
+		}
+	}
+	return added
 }
 
 // mergeMonitor applies a partial update, normalising values the way the API does.

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
@@ -27,6 +28,7 @@ var (
 	_ resource.Resource                   = (*monitorResource)(nil)
 	_ resource.ResourceWithImportState    = (*monitorResource)(nil)
 	_ resource.ResourceWithValidateConfig = (*monitorResource)(nil)
+	_ resource.ResourceWithModifyPlan     = (*monitorResource)(nil)
 )
 
 func NewMonitorResource() resource.Resource { return &monitorResource{} }
@@ -227,7 +229,7 @@ func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:    true,
 			},
 			"environments": schema.SetAttribute{
-				Description:   "Keys of the environments this monitor is associated with.",
+				Description:   "Keys of the environments this monitor is in. Cronitor adds a monitor to an environment when telemetry arrives from there (e.g. pings with ?env=<key>); the API can only remove environments. Leave unset to follow telemetry.",
 				ElementType:   types.StringType,
 				Optional:      true,
 				Computed:      true,
@@ -324,6 +326,40 @@ func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: []planmodifier.String{keep},
 			},
 		},
+	}
+}
+
+// environmentsRule is Cronitor's rule for monitor environments, for errors.
+const environmentsRule = "Cronitor adds a monitor to an environment when telemetry for it arrives from there (e.g. pings with ?env=<key>); the API can only remove environments. Leave environments unset to follow telemetry."
+
+// ModifyPlan refuses plans that would add a monitor to an environment, which
+// the API rejects, so they fail at plan time instead of during apply.
+func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var cfg monitorModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() || !known(cfg.Environments) {
+		return
+	}
+	have := map[string]bool{}
+	if !req.State.Raw.IsNull() {
+		var state monitorModel
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		for _, k := range stringsFrom(ctx, state.Environments, &resp.Diagnostics) {
+			have[k] = true
+		}
+	}
+	var added []string
+	for _, k := range stringsFrom(ctx, cfg.Environments, &resp.Diagnostics) {
+		if !have[k] {
+			added = append(added, k)
+		}
+	}
+	if len(added) > 0 {
+		resp.Diagnostics.AddAttributeError(path.Root("environments"), "Environments can't be added",
+			fmt.Sprintf("This would add the monitor to %s. %s", strings.Join(added, ", "), environmentsRule))
 	}
 }
 
@@ -539,26 +575,32 @@ func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if _, err := r.client.CreateMonitor(ctx, in); client.IsDuplicateKey(err) {
-		// Telemetry pings create a monitor for an unknown key, e.g. a
-		// heartbeat that started before its monitor was (re)created
+	var api *client.Monitor
+	_, err := r.client.CreateMonitor(ctx, in)
+	switch {
+	case client.IsDuplicateKey(err):
+		// Telemetry for an unknown key creates a monitor, e.g. a heartbeat
+		// that pinged before its monitor was (re)created. Take it over and
+		// apply this configuration (environments stay as telemetry set them).
 		resp.Diagnostics.AddWarning("Adopted an existing monitor",
 			fmt.Sprintf("A monitor with key %q already exists, so it is now managed with this configuration.", plan.Key.ValueString()))
-	} else if err != nil {
+		in = plan.toInput(ctx, true, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if api, err = r.client.UpdateMonitor(ctx, in); err != nil {
+			resp.Diagnostics.AddError("Error updating the existing monitor", err.Error())
+			return
+		}
+	case err != nil:
 		resp.Diagnostics.AddError("Error creating monitor", err.Error())
 		return
-	}
-	// Then the full configuration through the update endpoint, which also
-	// sets what the create endpoint leaves out (environments). It re-reads
-	// the monitor, so the state reflects its full representation.
-	in = plan.toInput(ctx, true, &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	api, err := r.client.UpdateMonitor(ctx, in)
-	if err != nil {
-		resp.Diagnostics.AddError("Error configuring monitor after create", err.Error())
-		return
+	default:
+		// Re-read so that the state reflects a full representation of the monitor.
+		if api, err = r.client.GetMonitor(ctx, plan.Key.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Error reading monitor after create", err.Error())
+			return
+		}
 	}
 	plan.fromAPI(api)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)

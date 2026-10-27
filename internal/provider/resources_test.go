@@ -1,9 +1,9 @@
 package provider
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -30,7 +30,7 @@ resource "cronitor_monitor" "backup" {
 					resource.TestCheckResourceAttr("cronitor_monitor.backup", "platform", "linux cron"),
 					resource.TestCheckResourceAttr("cronitor_monitor.backup", "notify.#", "1"),
 					resource.TestCheckTypeSetElemAttr("cronitor_monitor.backup", "notify.*", "default"),
-					resource.TestCheckTypeSetElemAttr("cronitor_monitor.backup", "environments.*", "production"),
+					resource.TestCheckResourceAttr("cronitor_monitor.backup", "environments.#", "0"),
 					resource.TestCheckResourceAttr("cronitor_monitor.backup", "paused", "false"),
 					resource.TestCheckNoResourceAttr("cronitor_monitor.backup", "note"),
 					resource.TestCheckNoResourceAttr("cronitor_monitor.backup", "tags"),
@@ -379,56 +379,76 @@ resource "cronitor_status_page_component" "bad" {
 	})
 }
 
-// A heartbeat that pings before its monitor exists makes Cronitor create the
-// monitor itself, in the default environment. Creating it then adopts it.
-func TestMonitorAdoptsExisting(t *testing.T) {
-	srv := newFakeAPI(t)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/monitors", strings.NewReader(`{"key": "web-1", "type": "heartbeat"}`))
+// ping sends telemetry for a monitor to the fake API, as a heartbeat would.
+func ping(t *testing.T, baseURL, key, env string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, baseURL+"/api/ping/"+key+"?env="+env, nil)
 	req.SetBasicAuth("test-key", "")
 	req.Header.Set("Cronitor-Version", "2025-11-28")
-	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
-	if err != nil || res.StatusCode != http.StatusCreated {
-		t.Fatalf("seeding the monitor: %v %v", res, err)
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("ping %s: %v %v", key, res, err)
 	}
 	res.Body.Close()
+}
+
+// Monitors join environments through telemetry only; the provider follows
+// that when environments is unset, can remove them, and refuses to add them.
+func TestMonitorEnvironments(t *testing.T) {
+	srv := newFakeAPI(t)
+	cfg := providerConfig(srv.URL) + `
+resource "cronitor_monitor" "web" {
+  key       = "web-2"
+  type      = "heartbeat"
+  schedules = ["every 1 minute"]
+%s}`
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testProviderFactories,
-		Steps: []resource.TestStep{{
-			Config: providerConfig(srv.URL) + `
-resource "cronitor_monitor" "web" {
-  key          = "web-1"
-  type         = "heartbeat"
-  name         = "web-1"
-  schedules    = ["every 1 minute"]
-  environments = ["staging"]
-}`,
-			Check: resource.ComposeAggregateTestCheckFunc(
-				resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "1"),
-				resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
-			),
-		}},
+		Steps: []resource.TestStep{
+			{
+				Config:      fmt.Sprintf(cfg, "  environments = [\"staging\"]\n"),
+				ExpectError: regexp.MustCompile(`Environments can't be added`),
+			},
+			{
+				Config: fmt.Sprintf(cfg, ""),
+				Check:  resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "0"),
+			},
+			{
+				PreConfig: func() { ping(t, srv.URL, "web-2", "staging") },
+				Config:    fmt.Sprintf(cfg, ""),
+				Check:     resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
+			},
+			{
+				Config: fmt.Sprintf(cfg, "  environments = []\n"),
+				Check:  resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "0"),
+			},
+			{
+				Config:      fmt.Sprintf(cfg, "  environments = [\"staging\"]\n"),
+				ExpectError: regexp.MustCompile(`Environments can't be added`),
+			},
+		},
 	})
 }
 
-// The create endpoint ignores environments, so they're set by the update
-// that follows it.
-func TestMonitorCreateWithEnvironments(t *testing.T) {
+// A heartbeat that pings before its monitor exists makes Cronitor create the
+// monitor itself. Creating it then adopts it, keeping its environment.
+func TestMonitorAdoptsExisting(t *testing.T) {
 	srv := newFakeAPI(t)
+	ping(t, srv.URL, "web-1", "staging")
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testProviderFactories,
 		Steps: []resource.TestStep{{
 			Config: providerConfig(srv.URL) + `
 resource "cronitor_monitor" "web" {
-  key          = "web-2"
-  type         = "heartbeat"
-  schedules    = ["every 1 minute"]
-  environments = ["staging"]
+  key       = "web-1"
+  type      = "heartbeat"
+  name      = "Web 1"
+  schedules = ["every 1 minute"]
 }`,
 			Check: resource.ComposeAggregateTestCheckFunc(
-				resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "1"),
+				resource.TestCheckResourceAttr("cronitor_monitor.web", "name", "Web 1"),
 				resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
 			),
 		}},
