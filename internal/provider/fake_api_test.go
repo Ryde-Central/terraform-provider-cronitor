@@ -89,7 +89,7 @@ func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[s
 	case method == http.MethodPost && key == "":
 		k, _ := body["key"].(string)
 		if _, exists := c[k]; exists {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"non_field_errors": []string{"Duplicate key error: " + k}})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"key": []string{"Duplicate key error"}})
 			return
 		}
 		if body["type"] == "check" && body["request"] == nil {
@@ -120,7 +120,11 @@ func (f *fakeAPI) monitors(w http.ResponseWriter, method, key string, body map[s
 		if body["type"] == "check" {
 			m["platform"] = "http"
 		}
-		mergeMonitor(m, body)
+		// Like the API, creating ignores environments; only the bulk
+		// update sets them
+		create := maps.Clone(body)
+		delete(create, "environments")
+		mergeMonitor(m, create)
 		c[k] = m
 		writeJSON(w, http.StatusCreated, monitorView(m))
 	case method == http.MethodPut && key == "":

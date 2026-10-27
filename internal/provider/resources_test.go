@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -373,6 +375,62 @@ resource "cronitor_status_page_component" "bad" {
   group      = "b"
 }`,
 			ExpectError: regexp.MustCompile(`(?s)These attributes cannot be configured together|Invalid Attribute Combination`),
+		}},
+	})
+}
+
+// A heartbeat that pings before its monitor exists makes Cronitor create the
+// monitor itself, in the default environment. Creating it then adopts it.
+func TestMonitorAdoptsExisting(t *testing.T) {
+	srv := newFakeAPI(t)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/monitors", strings.NewReader(`{"key": "web-1", "type": "heartbeat"}`))
+	req.SetBasicAuth("test-key", "")
+	req.Header.Set("Cronitor-Version", "2025-11-28")
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != http.StatusCreated {
+		t.Fatalf("seeding the monitor: %v %v", res, err)
+	}
+	res.Body.Close()
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: providerConfig(srv.URL) + `
+resource "cronitor_monitor" "web" {
+  key          = "web-1"
+  type         = "heartbeat"
+  name         = "web-1"
+  schedules    = ["every 1 minute"]
+  environments = ["staging"]
+}`,
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "1"),
+				resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
+			),
+		}},
+	})
+}
+
+// The create endpoint ignores environments, so they're set by the update
+// that follows it.
+func TestMonitorCreateWithEnvironments(t *testing.T) {
+	srv := newFakeAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: providerConfig(srv.URL) + `
+resource "cronitor_monitor" "web" {
+  key          = "web-2"
+  type         = "heartbeat"
+  schedules    = ["every 1 minute"]
+  environments = ["staging"]
+}`,
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "1"),
+				resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
+			),
 		}},
 	})
 }

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
@@ -538,14 +539,25 @@ func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if _, err := r.client.CreateMonitor(ctx, in); err != nil {
+	if _, err := r.client.CreateMonitor(ctx, in); client.IsDuplicateKey(err) {
+		// Telemetry pings create a monitor for an unknown key, e.g. a
+		// heartbeat that started before its monitor was (re)created
+		resp.Diagnostics.AddWarning("Adopted an existing monitor",
+			fmt.Sprintf("A monitor with key %q already exists, so it is now managed with this configuration.", plan.Key.ValueString()))
+	} else if err != nil {
 		resp.Diagnostics.AddError("Error creating monitor", err.Error())
 		return
 	}
-	// Re-read so that the state reflects a full representation of the monitor.
-	api, err := r.client.GetMonitor(ctx, plan.Key.ValueString())
+	// Then the full configuration through the update endpoint, which also
+	// sets what the create endpoint leaves out (environments). It re-reads
+	// the monitor, so the state reflects its full representation.
+	in = plan.toInput(ctx, true, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	api, err := r.client.UpdateMonitor(ctx, in)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading monitor after create", err.Error())
+		resp.Diagnostics.AddError("Error configuring monitor after create", err.Error())
 		return
 	}
 	plan.fromAPI(api)

@@ -99,6 +99,14 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
+// IsDuplicateKey reports whether err is the API refusing to create an object
+// whose key already exists.
+func IsDuplicateKey(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(apiErr.Body, "Duplicate key")
+}
+
 // do sends a request and decodes a JSON response into out (if non-nil).
 // Rate-limited (429) and transient gateway errors are retried with backoff.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
