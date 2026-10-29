@@ -83,7 +83,8 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // ping is telemetry (cronitor.link/p/<ping key>/<monitor>?env=<env>): like
 // the API, it creates an unknown monitor and is the only way a monitor joins
-// an environment.
+// an environment. Like the API, a monitor can list an environment more than
+// once.
 func (f *fakeAPI) ping(w http.ResponseWriter, key, env string) {
 	c := f.coll("monitors")
 	m, ok := c[key]
@@ -94,9 +95,7 @@ func (f *fakeAPI) ping(w http.ResponseWriter, key, env string) {
 	}
 	if env != "" {
 		envs, _ := m["environments"].([]any)
-		if !slices.Contains(envs, any(env)) {
-			m["environments"] = append(envs, env)
-		}
+		m["environments"] = append(envs, env)
 	}
 	w.WriteHeader(http.StatusOK)
 }

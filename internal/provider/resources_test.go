@@ -415,9 +415,13 @@ resource "cronitor_monitor" "web" {
 				Check:  resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "0"),
 			},
 			{
-				PreConfig: func() { ping(t, srv.URL, "web-2", "staging") },
+				// Twice: the API then lists the environment twice
+				PreConfig: func() { ping(t, srv.URL, "web-2", "staging"); ping(t, srv.URL, "web-2", "staging") },
 				Config:    fmt.Sprintf(cfg, ""),
-				Check:     resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("cronitor_monitor.web", "environments.#", "1"),
+					resource.TestCheckTypeSetElemAttr("cronitor_monitor.web", "environments.*", "staging"),
+				),
 			},
 			{
 				Config: fmt.Sprintf(cfg, "  environments = []\n"),

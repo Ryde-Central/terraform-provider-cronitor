@@ -86,13 +86,20 @@ func nullableString(v types.String) any {
 
 // setValue builds a set of strings from API values. An empty API value becomes
 // null unless the prior value was an explicitly empty set, so that omitting an
-// optional attribute does not produce a diff against the API's [].
+// optional attribute does not produce a diff against the API's []. Repeated
+// values are dropped: the API can list one more than once (a monitor's
+// environments do), and a set can't hold duplicates.
 func setValue(vals []string, prior types.Set) types.Set {
 	if len(vals) == 0 && (prior.IsNull() || prior.IsUnknown()) {
 		return types.SetNull(types.StringType)
 	}
 	elems := make([]attr.Value, 0, len(vals))
+	seen := make(map[string]bool, len(vals))
 	for _, v := range vals {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
 		elems = append(elems, types.StringValue(v))
 	}
 	return types.SetValueMust(types.StringType, elems)
